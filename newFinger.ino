@@ -1,248 +1,159 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_ILI9341.h>
-#include <TouchScreen.h>
+#include <Adafruit_FT6206.h>
 #include <Adafruit_Fingerprint.h>
-#include <SPI.h>
 #include <SD.h>
+#include <SPI.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
-#include <ArduinoJson.h>
 
-#define TFT_DC 9
-#define TFT_CS 10
-#define TFT_RST 8
-#define TS_MINX 150
-#define TS_MAXX 900
-#define TS_MINY 120
-#define TS_MAXY 940
-#define YP A3
-#define XM A2
-#define YM 7
-#define XP 6
-#define TS_LEFT 150
-#define TS_RT 920
-#define TS_TOP 940
-#define TS_BOT 120
-#define MINPRESSURE 10
-#define MAXPRESSURE 1000
-#define SD_CS 4
+#define SD_CS 5
+#define TFT_CS 6
+#define TFT_DC 7
+#define TS_CS 8
+#define FINGERPRINT_RX 9
+#define FINGERPRINT_TX 10
+#define FINGERPRINT_PASSWORD 0x0
 #define MAX_USERS 50
 
-Adafruit_Fingerprint finger = Adafruit_Fingerprint(&Serial1);
+Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC);
+Adafruit_FT6206 ts = Adafruit_FT6206();
+SoftwareSerial mySerial(FINGERPRINT_RX, FINGERPRINT_TX);
+Adafruit_Fingerprint finger = Adafruit_Fingerprint(&mySerial);
+
 File dataFile;
-char name[20];
-uint8_t i = 0;
+
+char ssid[] = "nombre_de_la_red_wifi";     // Nombre de la red WiFi
+char pass[] = "contraseña_de_la_red_wifi"; // Contraseña de la red WiFi
+String access_token = "token_de_acceso_de_Google_Sheets";
+String spreadsheet_id = "id_de_la_hoja_de_cálculo_de_Google_Sheets";
+String range = "nombre_de_la_hoja_de_cálculo!A1:D1";
+
+struct User {
+  String name;
+  uint32_t fingerprintID;
+};
+
+User userList[MAX_USERS];
 uint8_t numUsers = 0;
+uint8_t i = 0;
 
-// Configura el sensor de pantalla táctil
-TouchScreen ts = TouchScreen(XP, YP, XM, YM, 300);
+// Función para obtener la fecha y hora actual
+void getDateTime(String& date, String& time) {
+  time_t now = time(nullptr);
+  struct tm* timeinfo = localtime(&now);
 
-// Configura la pantalla
-Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC, TFT_RST);
+  char buffer[80];
+  strftime(buffer, sizeof(buffer), "%Y-%m-%d", timeinfo);
+  date = buffer;
 
-// Configura las credenciales de Wi-Fi y la dirección del servidor web
-const char* ssid = "nombre_red_wifi";
-const char* password = "contraseña_wifi";
-const char* serverName = "https://sheets.googleapis.com";
-const char* fingerprint = "XX XX XX XX XX XX XX XX XX XX XX XX XX XX XX XX XX XX XX XX";
-
-void setup() {
-  Serial.begin(9600);
-  finger.begin(FINGERPRINT_PASSWORD);
-  if (finger.verifyPassword()) {
-    Serial.println("Modulo de huella dactilar verificado");
-  }
-  else {
-    Serial.println("Modulo de huella dactilar no se pudo verificar");
-    while (1) {
-      delay(100);
-    }
-  }
-
-  // Configura la pantalla
-  tft.begin();
-  ts.begin();
-
-  tft.fillScreen(ILI9341_WHITE);
-  tft.setCursor(20, 50);
-  tft.print("Sistema de Asistencia");
-  tft.setCursor(20, 80);
-  tft.print("Listo");
-  delay(1000);
-  tft.fillScreen(ILI9341_WHITE);
-
-  // Configura la tarjeta SD
-  if (!SD.begin(SD_CS)) {
-    Serial.println("No se pudo inicializar la tarjeta SD");
-    while (1) {
-      delay(100);
-    }
-  }
-
-  // Lee los usuarios de la tarjeta SD
-  readUsers();
-  printUsers();
-  
-  // Conecta a Wi-Fi
-  WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(1000);
-    Serial.println("Conectando a Wi-Fi...");
-  }
-  Serial.println("Conectado a Wi-Fi");
-}
-
-void loop() {
-  TSPoint touch = ts.getPoint();
-  pinMode(XM, OUTPUT);
-  pinMode(YP, OUTPUT);
-  if (touch.z > 0 && touch.z < 1000) {
-    int16_t x = map(touch.y, TS_LEFT, TS_RT, 0, tft.width());
-    int16_t y = map(touch.x, TS_TOP, TS_BOT, 0, tft.height());
-    char buttonPressed = checkButtons(x, y);
-   
-// Si se presionó un botón de la pantalla táctil
-if (buttonPressed != 0) {
-switch (buttonPressed) {
-
-  // Si se presionó el botón de añadir usuario
-  case 'A': {
-    // Mostrar mensaje en pantalla
-    tft.fillScreen(ILI9341_WHITE);
-    tft.setCursor(20, 50);
-    tft.print("Ingrese nombre:");
-    // Limpiar variable de nombre y mostrar teclado en pantalla
-    clearName();
-    drawKeyboard();
-    break;
-  }
-  
-  // Si se presionó el botón de eliminar usuario
-  case 'D': {
-    // Mostrar mensaje en pantalla
-    tft.fillScreen(ILI9341_WHITE);
-    tft.setCursor(20, 50);
-    tft.print("Ingrese ID:");
-    // Limpiar variable de ID y mostrar teclado numérico en pantalla
-    clearID();
-    drawNumericKeyboard();
-    break;
-  }
-  
-  // Si se presionó el botón de mostrar registros
-  case 'L': {
-    // Mostrar registros en la pantalla
-    showRecords();
-    break;
-  }
-  
-  // Si se presionó el botón de hacer una asistencia
-  case 'P': {
-    // Hacer la asistencia con el sensor de huellas
-    int fingerID = getFingerprintID();
-    if (fingerID > 0) {
-      // Mostrar el nombre del usuario y la hora en pantalla
-      showUserAndTime(fingerID);
-      // Agregar registro al archivo en la tarjeta SD
-      addRecordToSD(fingerID);
-      // Agregar registro a la hoja de cálculo de Google
-      addRecordToGoogleSheet(fingerID);
-    }
-    else {
-      // Si no se reconoce la huella, mostrar mensaje en pantalla
-      tft.fillScreen(ILI9341_WHITE);
-      tft.setCursor(20, 50);
-      tft.print("Huella no reconocida");
-      delay(2000);
-      tft.fillScreen(ILI9341_WHITE);
-    }
-    break;
-  }
-  
-  // Si se presionó el botón de salir del programa
-  case 'Q': {
-    // Salir del programa
-    tft.fillScreen(ILI9341_WHITE);
-    tft.setCursor(20, 50);
-    tft.print("Saliendo del programa");
-    delay(2000);
-    return;
-  }
-  
-  default:
-    break;
-}
-}
-
-delay(100);
-}
-  // Check if user is in the database
-  if (fingerID != FINGERPRINT_INVALIDID) {
-    Serial.println("User found, ID:" + String(fingerID));
-    tft.fillRect(0, 150, 320, 40, ILI9341_WHITE);
-    tft.setCursor(0, 150);
-    tft.print("ID: " + String(fingerID) + " ");
-    tft.print(userList[fingerID].name);
-    tft.print(" checked in at " + String(now.year()) + "/" + String(now.month()) + "/" + String(now.day()) + " " + String(now.hour()) + ":" + String(now.minute()));
-    tft.println();
-    delay(1000);
-    addLogToSD(String(fingerID) + "," + userList[fingerID].name + "," + String(now.year()) + "/" + String(now.month()) + "/" + String(now.day()) + "," + String(now.hour()) + ":" + String(now.minute()));
-    addLogToGoogleSheets(String(fingerID), userList[fingerID].name, String(now.year()), String(now.month()), String(now.day()), String(now.hour()), String(now.minute()));
-  }
-  else {
-    Serial.println("User not found");
-    tft.fillRect(0, 150, 320, 40, ILI9341_WHITE);
-    tft.setCursor(0, 150);
-    tft.print("User not found");
-    delay(1000);
-  }
-}
-}
-}
-
-// Función para verificar si se ha presionado un botón en la pantalla táctil
-char checkButtons(int16_t x, int16_t y) {
-if (x >= 20 && x <= 60 && y >= 50 && y <= 90) {
-return 'A';
-}
-else if (x >= 80 && x <= 120 && y >= 280 && y <= 320) {
-return 'P';
-}
-else if (x >= 200 && x <= 240 && y >= 280 && y <= 320) {
-return 'D';
-}
-else if (x >= 260 && x <= 300 && y >= 420 && y <= 460) {
-return '3';
-}
-return 0;
+  strftime(buffer, sizeof(buffer), "%H:%M:%S", timeinfo);
+  time = buffer;
 }
 
 // Función para añadir un usuario a la base de datos en la tarjeta SD
 void addUserToSD(String name) {
-dataFile = SD.open("users.txt", FILE_WRITE);
-if (dataFile) {
-dataFile.print(name + "\n");
-dataFile.close();
-readUsers();
+  if (numUsers < MAX_USERS) {
+    userList[numUsers].name = name;
+    userList[numUsers].fingerprintID = finger.storeTemplate();
+    dataFile = SD.open("users.txt", FILE_WRITE);
+    if (dataFile) {
+      dataFile.println(name);
+      dataFile.println(userList[numUsers].fingerprintID);
+      dataFile.close();
+      numUsers++;
+      tft.fillScreen(ILI9341_WHITE);
+      tft.setCursor(20, 50);
+      tft.print("Usuario agregado");
+      delay(2000);
+      tft.fillScreen(ILI9341_WHITE);
+      tft.setCursor(20, 50);
+      tft.print("Ingrese su huella");
+      tft.setCursor(20, 80);
+      tft.print("para registrar");
+      tft.setCursor(20, 110);
+      tft.print("entrada o salida");
+    }
+  } else {
+    tft.fillScreen(ILI9341_WHITE);
+    tft.setCursor(20, 50);
+    tft.print("Número máximo");
+    tft.setCursor(20, 80);
+    tft.print("de usuarios alcanzado");
+    delay(2000);
+    tft.fillScreen(ILI9341_WHITE);
+    tft.setCursor(20, 50);
+    tft.print("Ingrese su huella");
+    tft.setCursor(20, 80);
+    tft.print("para registrar");
+    tft.setCursor(20, 110);
+    tft.print("entrada o salida");
+  }
+}
+else if (buttonPressed == 'R') { // Si se presiona el botón "Registros"
+printLog();
+} else if (buttonPressed == 'P') { // Si se presiona el botón "Imprimir"
+printLog();
+}
 }
 }
 
-// Función para leer los usuarios de la base de datos en la tarjeta SD
-void readUsers() {
-dataFile = SD.open("users.txt");
-if (dataFile) {
-numUsers = 0;
-while (dataFile.available()) {
-String name = dataFile.readStringUntil('\n');
-name.trim();
-if (name.length() > 0) {
-userList[numUsers].name = name;
-numUsers++;
+// Función para verificar si la huella digital es válida y obtener el nombre del usuario
+String verifyFingerprint() {
+Serial.println("Coloque su dedo en el sensor de huellas digitales");
+tft.fillScreen(ILI9341_WHITE);
+tft.setCursor(20, 50);
+tft.print("Coloque su dedo en");
+tft.setCursor(20, 80);
+tft.print("el sensor de huellas");
+tft.setCursor(20, 110);
+tft.print("digitales");
+while (true) {
+if (finger.getImage()) {
+int fingerID = finger.fingerFastSearch();
+if (fingerID == FINGERPRINT_NOTFOUND) {
+tft.fillScreen(ILI9341_WHITE);
+tft.setCursor(20, 50);
+tft.print("Huella no encontrada");
+delay(2000);
+tft.fillScreen(ILI9341_WHITE);
+tft.setCursor(20, 50);
+tft.print("Coloque su dedo en");
+tft.setCursor(20, 80);
+tft.print("el sensor de huellas");
+tft.setCursor(20, 110);
+tft.print("digitales");
+} else {
+finger.loadTemplate(fingerID);
+String name = userList[fingerID].name;
+tft.fillScreen(ILI9341_WHITE);
+tft.setCursor(20, 50);
+tft.print("Huella reconocida");
+tft.setCursor(20, 80);
+tft.print("Bienvenido " + name);
+delay(2000);
+tft.fillScreen(ILI9341_WHITE);
+tft.setCursor(20, 50);
+tft.print("Ingrese su huella");
+tft.setCursor(20, 80);
+tft.print("para registrar");
+tft.setCursor(20, 110);
+tft.print("entrada o salida");
+return name;
 }
 }
-dataFile.close();
-Serial.println("Users loaded");
 }
+}
+
+// Función para obtener la fecha y hora actual
+void getDateTime(String& date, String& time) {
+time_t now = time(nullptr);
+struct tm* timeinfo = localtime(&now);
+char buffer[80];
+strftime(buffer, sizeof(buffer), "%Y-%m-%d,%H:%M:%S", timeinfo);
+date = buffer[0] == '0' ? buffer + 1 : buffer;
+strftime(buffer, sizeof(buffer), "%H:%M:%S", timeinfo);
+time = buffer;
 }
 
 // Función para añadir un registro a la base de datos en la tarjeta SD
@@ -257,116 +168,183 @@ Serial.println("Log added to SD");
 
 // Función para agregar un registro a Google Sheets usando la API de Google Sheets
 void addLogToGoogleSheets(String date, String time, String name, String status) {
-// Crea el objeto JSON con los datos del registro
-String jsonPayload = "{"values": [["" + date + "", "" + time + "", "" + name + "", "" + status + ""]]}";
-
-// Conecta con la API de Google Sheets
 WiFiClientSecure client;
-client.setCACert(root_ca);
-
 HTTPClient http;
-http.begin(client, "https://sheets.googleapis.com/v4/spreadsheets/" + spreadsheet_id + "/values/" + sheet_name + "!A1:D1:append?valueInputOption=RAW");
+
+// Obtener un token de acceso para la API de Google Sheets
+client.setCACert(root_ca);
+http.begin(client, "https://www.googleapis.com/oauth2/v4/token");
+http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+String payload = "client_id=" + client_id + "&client_secret=" + client_secret + "&refresh_token=" + refresh_token + "&grant_type=refresh_token";
+int httpCode = http.POST(payload);
+if (httpCode == HTTP_CODE_OK) {
+String response = http.getString();
+String access_token = extractAccessToken(response);
+
+// Agregar el registro a la hoja de cálculo de Google Sheets
+String url = "https://sheets.googleapis.com/v4/spreadsheets/" + spreadsheet_id + "/values/" + range + "?valueInputOption=USER_ENTERED";
+http.begin(client, url);
 http.addHeader("Authorization", "Bearer " + access_token);
 http.addHeader("Content-Type", "application/json");
+String payload = "{"range":"' + range + '","majorDimension":"ROWS","values":[["' + date + '","' + time + '","' + name + '","' + status + '"]]}";
+http.POST(payload);
 
-// Envía los datos del registro a Google Sheets
-int httpResponseCode = http.POST(jsonPayload);
-
-if (httpResponseCode == 200) {
 Serial.println("Log added to Google Sheets");
-}
-else {
-Serial.print("Error adding log to Google Sheets: ");
-Serial.println(httpResponseCode);
+} else {
+Serial.println("Error getting access token");
 }
 
 http.end();
+client.stop();
 }
 
-// Función para obtener la fecha y hora actual en formato "YYYY-MM-DD" y "HH:MM:SS"
-void getDateTime(String& date, String& time) {
-time_t now = time(nullptr);
-struct tm* timeinfo = localtime(&now);
-char buffer[80];
+// Función para imprimir los registros de la base de datos
+void printLog() {
+  dataFile = SD.open("log.txt");
+  if (dataFile) {
+    tft.fillScreen(ILI9341_WHITE);
+    tft.setCursor(20, 50);
+    tft.print("Registros en la SD:");
 
-strftime(buffer, sizeof(buffer), "%Y-%m-%d", timeinfo);
-date = buffer;
+    int count = 0;
+    while (dataFile.available()) {
+      String log = dataFile.readStringUntil('\n');
+      tft.setCursor(20, 80 + count * 20);
+      tft.print(log);
+      count++;
 
-strftime(buffer, sizeof(buffer), "%H:%M:%S", timeinfo);
-time = buffer;
+      if (count >= 8) {
+        delay(5000);
+        tft.fillScreen(ILI9341_WHITE);
+        tft.setCursor(20, 50);
+        tft.print("Registros en la SD:");
+        count = 0;
+      }
+    }
+
+    dataFile.close();
+    delay(5000);
+    tft.fillScreen(ILI9341_WHITE);
+    tft.setCursor(20, 50);
+    tft.print("Ingrese su huella");
+    tft.setCursor(20, 80);
+    tft.print("para registrar");
+    tft.setCursor(20, 110);
+    tft.print("entrada o salida");
+  } else {
+    Serial.println("Error opening log file");
+  }
 }
 
 void loop() {
-TSPoint touch = ts.getPoint();
-pinMode(XM, OUTPUT);
-pinMode(YP, OUTPUT);
-if (touch.z > 0 && touch.z < 1000) {
-int16_t x = map(touch.y, TS_LEFT, TS_RT, 0, tft.width());
-int16_t y = map(touch.x, TS_TOP, TS_BOT, 0, tft.height());
-char buttonPressed = checkButtons(x, y);
-if (buttonPressed == 'A') { // Si se presiona el botón "Agregar usuario"
-  addUser();
-}
-else if (buttonPressed == 'E') { // Si se presiona el botón "Eliminar usuario"
-  deleteUser();
-}
-else if (buttonPressed == 'L') { // Si se presiona el botón "Ver registros"
-  viewLogs();
-}
-else if (buttonPressed == 'P') { // Si se presiona el botón "Descargar registros"
-  downloadLogs();
-}
-else if (buttonPressed == '1') { // Si se presiona el botón "Ingreso"
-  String name = verifyFingerprint();
-  if (name != "") {
-    String date, time;
-    getDateTime(date, time);
-    addLogToSD(date + "," + time + "," + name + ",Ingreso");
-    addLogToGoogleSheets(date, time, name, "Ingreso");
-    tft.setCursor(20, 200);
-    tft.println("Bienvenido(a), " + name);
-    delay(2000);
+  TSPoint touch = ts.getPoint();
+  pinMode(XM, OUTPUT);
+  pinMode(YP, OUTPUT);
+  if (touch.z > 0 && touch.z < 1000) {
+    int16_t x = map(touch.y, TS_LEFT, TS_RT, 0, tft.width());
+    int16_t y = map(touch.x, TS_TOP, TS_BOT, 0, tft.height());
+    char buttonPressed = checkButtons(x, y);
+
+    if (buttonPressed == 'E') { // Si se presiona el botón "Usuarios"
+      i = 0;
+      while (true) {
+        tft.fillScreen(ILI9341_WHITE);
+        tft.setCursor(20, 50);
+        tft.print("Ingrese el nombre");
+        tft.setCursor(20, 80);
+        tft.print("del nuevo usuario");
+        tft.setCursor(20, 110);
+        tft.print(name);
+        char c = getButtonInput();
+        if (c == 'E') {
+          addUserToSD(name);
+          break;
+        } else if (c == 'D') {
+          if (i > 0) {
+            i--;
+            name[i] = '\0';
+            tft.fillRect(20 + i * 20, 50, 20, 20, ILI9341_WHITE);
+          }
+        } else if (c >= 'A' && c <= 'Z' && i < MAX_NAME_LENGTH) {
+          name[i] = c;
+          i++;
+          name[i] = '\0';
+          tft.setCursor(20 + i * 20, 50);
+          tft.print(c);
+        }
+      }
+    } else if (buttonPressed == 'A') { // Si se presiona el botón "Asistencia"
+      String name = verifyFingerprint();
+      if (name != "") {
+        String date, time;
+        getDateTime(date, time);
+        addLogToSD(date + "," + time + "," + name + ",Entrada");
+        addLogToGoogleSheets(date, time, name, "Entrada");
+        tft.fillScreen(ILI9341_WHITE);
+        tft.setCursor(20, 50);
+        tft.print("Entrada registrada");
+        delay(2000);
+        tft.fillScreen(ILI9341_WHITE);
+        tft.setCursor(20, 50);
+        tft.print("Ingrese su huella");
+        tft.setCursor(20, 80);
+        tft.print("para registrar");
+        tft.setCursor(20, 110);
+        tft.print("entrada o salida");
+      } else {
+        tft.fillScreen(ILI9341_WHITE);
+        tft.setCursor(20, 50);
+        tft.print("Huella no registrada");
+        delay(2000);
+        tft.fillScreen(ILI9341_WHITE);
+        tft.setCursor(20, 50);
+        tft.print("Ingrese su huella");
+        tft.setCursor(20, 80);
+        tft.print("para registrar");
+        tft.setCursor(20, 110);
+        tft.print("entrada o salida");
+      }
+    } else if (buttonPressed == 'S') { // Si se presiona el botón "Salida"
+      String name = verifyFingerprint();
+      if (name != "") {
+        String date, time;
+        getDateTime(date, time);
+        addLogToSD(date + "," + time + "," + name + ",Salida");
+        addLogToGoogleSheets(date, time, name, "Salida");
+        tft.fillScreen(ILI9341_WHITE);
+        tft.setCursor(20, 50);
+        tft.print("Salida registrada");
+        delay(2000);
+        tft.fillScreen(ILI9341_WHITE);
+        tft.setCursor(20, 50);
+        tft.print("Ingrese su huella");
+        tft.setCursor(20, 80);
+        tft.print("para registrar");
+        tft.setCursor(20, 110);
+        tft.print("entrada o salida");
+      } else {
+        tft.fillScreen(ILI9341_WHITE);
+        tft.setCursor(20, 50);
+        tft.print("Huella no registrada");
+        delay(2000);
+        tft.fillScreen(ILI9341_WHITE);
+        tft.setCursor(20, 50);
+        tft.print("Ingrese su huella");
+        tft.setCursor(20, 80);
+        tft.print("para registrar");
+        tft.setCursor(20, 110);
+        tft.print("entrada o salida");
+      }
+    } else if (buttonPressed == 'R') { // Si se presiona el botón "Reiniciar"
+      tft.fillScreen(ILI9341_WHITE);
+      tft.setCursor(20, 50);
+      tft.print("Reiniciando...");
+      delay(2000);
+      ESP.restart();
+    } else if (buttonPressed == 'P') { // Si se presiona el botón "Imprimir"
+      printLog();
+    }
   }
-  else {
-    tft.setCursor(20, 200);
-    tft.println("Huella no reconocida");
-    delay(2000);
-  }
-}
-else if (buttonPressed == '2') { // Si se presiona el botón "Salida"
-  String name = verifyFingerprint();
-  if (name != "") {
-    String date, time;
-    getDateTime(date, time);
-    addLogToSD(date"," + time + "," + name + ",S");
-addLogToGoogleSheets(date, time, name, "S");
-tft.fillScreen(ILI9341_WHITE);
-tft.setCursor(20, 50);
-tft.print("Salida registrada");
-delay(2000);
-tft.fillScreen(ILI9341_WHITE);
-tft.setCursor(20, 50);
-tft.print("Ingrese su huella");
-tft.setCursor(20, 80);
-tft.print("para registrar");
-tft.setCursor(20, 110);
-tft.print("entrada o salida");
-currentID = -1;
-currentName = "";
-}
-else {
-tft.fillScreen(ILI9341_WHITE);
-tft.setCursor(20, 50);
-tft.print("Huella no registrada");
-delay(2000);
-tft.fillScreen(ILI9341_WHITE);
-tft.setCursor(20, 50);
-tft.print("Ingrese su huella");
-tft.setCursor(20, 80);
-tft.print("para registrar");
-tft.setCursor(20, 110);
-tft.print("entrada o salida");
-}
-}
-delay(100);
+  
+  delay(100);
 }
